@@ -9,7 +9,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: 2m
 spec:
   rules:
-    - host: gitlab-mr-blocker.ppl.cs.ui.ac.id
+    - host: jira-sync-mr-blocker.ppl.cs.ui.ac.id
       http:
         paths:
           - path: /
@@ -21,5 +21,5 @@ spec:
                   number: 8000
   tls:
     - hosts:
-        - gitlab-mr-blocker.ppl.cs.ui.ac.id
+        - jira-sync-mr-blocker.ppl.cs.ui.ac.id
       secretName: cs12-tls
