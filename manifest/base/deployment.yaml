@@ -17,7 +17,7 @@ spec:
         app.kubernetes.io/name: gitlab-mr-blocker
     spec:
       imagePullSecrets:
-        - name: gitlab-registry-secret
+        - name: gitlab-mr-blocker-registry-secret
       containers:
         - name: gitlab-mr-blocker
           image: __IMAGE__
