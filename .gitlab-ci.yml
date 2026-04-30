@@ -1,0 +1,107 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+variables:
+  APP_NAME: "gitlab-mr-blocker"
+  IMAGE_REGISTRY: "$CI_REGISTRY_IMAGE"
+  IMAGE_SHA_TAG: "$IMAGE_REGISTRY:$CI_COMMIT_SHORT_SHA"
+  IMAGE_LATEST_TAG: "$IMAGE_REGISTRY:latest"
+  IMAGE_RELEASE_TAG: "$IMAGE_REGISTRY:$CI_COMMIT_TAG"
+  GITLAB_URL: "https://gitlab.cs.ui.ac.id/api/v4"
+  JIRA_BLOCK_LINK_TYPE_NAME: "Blocks"
+  REQUEST_TIMEOUT_SECONDS: "10"
+  LOG_LEVEL: "INFO"
+  KUBE_NAMESPACE: "ppl-sihumas"
+  KUBE_KUSTOMIZE_DIR: "manifest/overlays/production"
+  KUBE_DEPLOYMENT_NAME: "gitlab-mr-blocker-production"
+  KUBE_SECRET_NAME: "gitlab-mr-blocker-secret"
+  KUBE_REGISTRY_SECRET_NAME: "gitlab-registry-secret"
+  DOCKER_IMAGE: "docker:24.0.5"
+  DIND_SERVICE: "docker:24.0.5-dind"
+  DOCKER_DRIVER: "overlay2"
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_BUILDKIT: "1"
+  GIT_DEPTH: "0"
+
+stages:
+  - build
+  - deploy
+
+default:
+  interruptible: true
+
+.docker-base:
+  image: $DOCKER_IMAGE
+  services:
+    - name: $DIND_SERVICE
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+.kubectl-base:
+  image:
+    name: bitnamilegacy/kubectl:1.33.4-debian-12-r0
+    entrypoint: [""]
+  before_script:
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG_DATA" | base64 -d > ~/.kube/config
+    - chmod 600 ~/.kube/config
+
+build:image:
+  extends: .docker-base
+  stage: build
+  script:
+    - docker build --pull -t "$IMAGE_SHA_TAG" .
+    - docker push "$IMAGE_SHA_TAG"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        docker tag "$IMAGE_SHA_TAG" "$IMAGE_LATEST_TAG"
+        docker push "$IMAGE_LATEST_TAG"
+      fi
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        docker tag "$IMAGE_SHA_TAG" "$IMAGE_RELEASE_TAG"
+        docker push "$IMAGE_RELEASE_TAG"
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+deploy:production:
+  extends: .kubectl-base
+  stage: deploy
+  needs:
+    - build:image
+  script:
+    - |
+      kubectl -n "$KUBE_NAMESPACE" create secret docker-registry "$KUBE_REGISTRY_SECRET_NAME" \
+        --docker-server="$CI_REGISTRY" \
+        --docker-username="$CI_REGISTRY_USER" \
+        --docker-password="$CI_REGISTRY_PASSWORD" \
+        --docker-email="ci@example.com" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    - |
+      cat > .deploy.env <<EOF
+      GITLAB_TOKEN=$GITLAB_TOKEN
+      GITLAB_URL=$GITLAB_URL
+      GITLAB_WEBHOOK_SECRET=$GITLAB_WEBHOOK_SECRET
+      JIRA_URL=$JIRA_URL
+      JIRA_EMAIL=$JIRA_EMAIL
+      JIRA_API_TOKEN=$JIRA_API_TOKEN
+      JIRA_BLOCK_LINK_TYPE_NAME=$JIRA_BLOCK_LINK_TYPE_NAME
+      REQUEST_TIMEOUT_SECONDS=$REQUEST_TIMEOUT_SECONDS
+      LOG_LEVEL=$LOG_LEVEL
+      EOF
+      kubectl -n "$KUBE_NAMESPACE" create secret generic "$KUBE_SECRET_NAME" \
+        --from-env-file=.deploy.env \
+        --dry-run=client -o yaml | kubectl apply -f -
+      rm -f .deploy.env
+    - kubectl kustomize "$KUBE_KUSTOMIZE_DIR" | sed "s|__IMAGE__|$IMAGE_SHA_TAG|g" | kubectl -n "$KUBE_NAMESPACE" apply -f -
+    - kubectl -n "$KUBE_NAMESPACE" rollout status deployment/"$KUBE_DEPLOYMENT_NAME" --timeout=180s
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

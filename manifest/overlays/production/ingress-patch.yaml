@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gitlab-mr-blocker
+spec:
+  rules:
+    - host: gitlab-mr-blocker.ppl.cs.ui.ac.id
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gitlab-mr-blocker
+                port:
+                  number: 8000
+  tls:
+    - hosts:
+        - gitlab-mr-blocker.ppl.cs.ui.ac.id
+      secretName: cs12-tls
