@@ -33,6 +33,13 @@ class GitLabApiError(RuntimeError):
     """Raised when GitLab API interaction fails."""
 
 
+def summarize_response_text(text: str, limit: int = 500) -> str:
+    normalized = " ".join((text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
+
+
 @dataclass(frozen=True)
 class Settings:
     gitlab_token: str | None
@@ -219,9 +226,20 @@ class JiraClient:
             params={"fields": "issuelinks"},
         )
 
+        logger.info(
+            "Jira issue fetch issue=%s status=%s",
+            issue_key,
+            response.status_code,
+        )
         if response.status_code == status.HTTP_404_NOT_FOUND:
             raise JiraApiError(f"Jira issue {issue_key} not found")
         if response.is_error:
+            logger.error(
+                "Jira issue fetch failed issue=%s status=%s body=%s",
+                issue_key,
+                response.status_code,
+                summarize_response_text(response.text),
+            )
             raise JiraApiError(
                 f"Failed to fetch Jira issue {issue_key}: "
                 f"{response.status_code} {response.text}"
@@ -271,18 +289,33 @@ class GitLabClient:
     async def resolve_open_merge_request(
         self, project_id: int, jira_key: str, exclude_iid: int | None = None
     ) -> MergeRequestResolution:
+        search_url = f"{self._settings.gitlab_url}/projects/{project_id}/merge_requests"
+        params = {
+            "state": "opened",
+            "search": jira_key,
+            "in": "title",
+            "per_page": 100,
+        }
         response = await self._http_client.get(
-            f"{self._settings.gitlab_url}/projects/{project_id}/merge_requests",
+            search_url,
             headers=self._headers,
-            params={
-                "state": "opened",
-                "search": jira_key,
-                "in": "title",
-                "per_page": 100,
-            },
+            params=params,
         )
 
+        logger.info(
+            "GitLab MR search project_id=%s jira_key=%s status=%s",
+            project_id,
+            jira_key,
+            response.status_code,
+        )
         if response.is_error:
+            logger.error(
+                "GitLab MR search failed project_id=%s jira_key=%s status=%s body=%s",
+                project_id,
+                jira_key,
+                response.status_code,
+                summarize_response_text(response.text),
+            )
             raise GitLabApiError(
                 "Failed to search merge requests for "
                 f"{jira_key}: {response.status_code} {response.text}"
@@ -315,12 +348,28 @@ class GitLabClient:
         )
 
     async def get_dependencies(self, project_id: int, mr_iid: int) -> dict[int, int]:
+        dependency_url = (
+            f"{self._settings.gitlab_url}/projects/{project_id}/merge_requests/{mr_iid}/blocks"
+        )
         response = await self._http_client.get(
-            f"{self._settings.gitlab_url}/projects/{project_id}/merge_requests/{mr_iid}/blocks",
+            dependency_url,
             headers=self._headers,
         )
 
+        logger.info(
+            "GitLab dependency fetch project_id=%s blocked_mr_iid=%s status=%s",
+            project_id,
+            mr_iid,
+            response.status_code,
+        )
         if response.is_error:
+            logger.error(
+                "GitLab dependency fetch failed project_id=%s blocked_mr_iid=%s status=%s body=%s",
+                project_id,
+                mr_iid,
+                response.status_code,
+                summarize_response_text(response.text),
+            )
             raise GitLabApiError(
                 "Failed to fetch merge request dependencies for "
                 f"!{mr_iid}: {response.status_code} {response.text}"
@@ -346,17 +395,37 @@ class GitLabClient:
         if blocking_merge_request.project_id != project_id:
             params["blocking_project_id"] = blocking_merge_request.project_id
 
+        dependency_url = (
+            f"{self._settings.gitlab_url}/projects/{project_id}/merge_requests/{blocked_mr_iid}/blocks"
+        )
         response = await self._http_client.post(
-            f"{self._settings.gitlab_url}/projects/{project_id}/merge_requests/{blocked_mr_iid}/blocks",
+            dependency_url,
             headers=self._headers,
             params=params,
         )
 
+        logger.info(
+            "GitLab dependency create project_id=%s blocked_mr_iid=%s blocking_project_id=%s blocking_mr_iid=%s status=%s",
+            project_id,
+            blocked_mr_iid,
+            blocking_merge_request.project_id,
+            blocking_merge_request.iid,
+            response.status_code,
+        )
         if response.status_code == status.HTTP_201_CREATED:
             return True
         if response.status_code == status.HTTP_409_CONFLICT:
             return False
 
+        logger.error(
+            "GitLab dependency create failed project_id=%s blocked_mr_iid=%s blocking_project_id=%s blocking_mr_iid=%s status=%s body=%s",
+            project_id,
+            blocked_mr_iid,
+            blocking_merge_request.project_id,
+            blocking_merge_request.iid,
+            response.status_code,
+            summarize_response_text(response.text),
+        )
         raise GitLabApiError(
             "Failed to create merge request dependency "
             f"!{blocked_mr_iid} <- !{blocking_merge_request.iid}: "
@@ -598,10 +667,13 @@ async def gitlab_webhook(request: Request) -> dict[str, Any]:
         try:
             report = await sync_service.sync(event)
         except JiraApiError as exc:
+            logger.exception("Webhook sync failed during Jira step: %s", exc)
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         except GitLabApiError as exc:
+            logger.exception("Webhook sync failed during GitLab step: %s", exc)
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         except httpx.HTTPError as exc:
+            logger.exception("Webhook sync failed due to network error: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Network error while syncing dependency: {exc}",
